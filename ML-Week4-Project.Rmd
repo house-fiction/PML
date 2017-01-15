@@ -1,0 +1,336 @@
+---
+title: "Machine Learning Project Report"
+author: "Harald Erb"
+date: "January 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+.libPaths("D:/R/win-library/3.3");
+.libPaths()
+
+```
+## Introduction 
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. 
+
+More information is available from the website [here] (http://groupware.les.inf.puc-rio.br/har)
+(see the section on the Weight Lifting Exercise Dataset).
+
+
+## Preparing the environment
+```{r, warning = FALSE, message = FALSE}
+##  Load necessary Packages for the project
+library(data.table)
+library(dplyr)
+library(xtable)
+library(ggplot2)
+library(knitr)
+library(reshape2)
+library(gridExtra)
+library(caret)
+library(randomForest)
+
+# Set working directory on local computer 
+setwd("D:/01 - DATA SCIENCE/20 - J. Hopkins University (Coursera)/08 - Practical Machine Learning/R-WorkDir")
+```
+
+## Using the Load Weight Lifting Exercise Data sets
+```{r, warning = FALSE, message = FALSE}
+## Training data
+#download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", destfile = "./data/pml-training.csv")
+
+## Test data
+#download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", destfile = "./data/pml-testing.csv")
+
+## Reading the raw data sets
+raw_train_dat <- read.csv("./data/pml-training.csv", header = TRUE)
+raw_test_dat  <- read.csv("./data/pml-testing.csv", header = TRUE)
+
+## Data Inspection
+#str(raw_train_dat)
+#summary(raw_train_dat)
+
+#str(raw_test_dat)
+#summary(raw_test_dat)
+```
+
+### Findings
+The raw training dataset contained 19622 rows of data, with 160 variables, the testing data set 20 rows of data, with 160 variables. Many variables contained largely missing data (usually with only one row of data)
+
+### Data preparation steps
+Sanitize the data by removing excel division error strings `#DIV/0!` and replacing them with `NA` values. and converting empty strings to 'NA' values.
+
+```{r, warning = FALSE, message = FALSE}
+
+train_dat <- read.csv("./data/pml-training.csv", header = TRUE, na.strings = c("NA", "#DIV/0!",""))
+test_dat <- read.csv("./data/pml-testing.csv", header = TRUE, na.strings = c("NA", "#DIV/0!",""))
+
+## Data Inspection
+#summary(train_dat)
+
+```
+## Data exploration
+According to the original website, six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: Class A = exactly according to the specification, Class B = throwing the elbows to the front, Class C = lifting the dumbbell only halfway, Class D = lowering the dumbbell only halfway and Class E = throwing the hips to the front. Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.
+
+###Visualization how participants did their exercises
+
+```{r, warning = FALSE, message = FALSE}
+theme_set(theme_classic(base_size = 16))
+qplot(x = classe, y = cvtd_timestamp, data = train_dat, color = user_name, size = I(3))
+
+```
+
+## Feature Selection
+With a clean data set, the next task was to explore the data and determine what is likely useful information. An important goal of any model is to generalize well with unseen data. Therefore any features that contained NA values have should be removed and as well as columns that appeared to be entirely metadata.
+
+Belt, arm, dumbbell, and forearm variables that do not have any missing values in the test dataset will be chosen as predictor candidates
+
+```{r, warning = FALSE, message = FALSE}
+is_missing <- sapply(test_dat, function (x) any(is.na(x) | x == ""))
+
+is_predictor <- !is_missing & grepl("belt|[^(fore)]arm|dumbbell|forearm", names(is_missing))
+pred_candidates <- names(is_missing)[is_predictor]
+pred_candidates
+
+```
+
+Subsetting the training dataset to include only the predictor candidates and the outcome variable = classe.
+```{r, warning = FALSE, message = FALSE}
+train_variables <- c("classe", pred_candidates)
+train_dat <- train_dat[, train_variables]
+
+dim(train_dat)
+
+summary(train_dat$classe)
+
+```
+###Visualization which variables have high correlations
+
+```{r, warning = FALSE, message = FALSE, fig.width=12,fig.height=12,dpi=100,out.width='1200px',out.height='1200px'}
+cor_matrix <- cor(train_dat[sapply(train_dat, is.numeric)])
+c <- melt(cor_matrix)
+
+qplot(x = Var1, y = Var2, data = c, fill = value, geom = "tile") +
+	scale_fill_gradient2(limits = c(-1,1))  +
+	theme(axis.text.x = element_text(angle = -90, vjust = 0.5, hjust = 0))
+	
+```
+
+## Cross Validation
+
+While the original Load Weight Lifting Exercise Data sets are split into training and testing already, the small testing data set has to be used for the purpose of the validation of the assignment only. For cross validation the original training data set (train_data) will be splitted into 60%  for model training (model_train_dat) and the remaining 40% for model testing (model_test_dat).
+
+```{r, warning = FALSE, message = TRUE}
+
+seed <- as.numeric(as.Date("2014-10-26"))
+set.seed(seed)
+
+inTrain <- createDataPartition(train_dat$classe, p = 0.6, list = FALSE)
+model_train_dat <- train_dat[inTrain,]
+model_test_dat <- train_dat[-inTrain,]
+
+# Check for near zero variance.
+nzv <- nearZeroVar(model_train_dat, saveMetrics=TRUE)
+if (any(nzv$nzv)) nzv else message("No variables with near zero variance")
+
+```
+
+## Training of the prediction model (Method = Random Forest)
+Using random forest, the out of sample error should be small. The error will be estimated using the 40% probing sample. 
+
+```{r, warning = FALSE, message = TRUE}
+
+raining_model <- train(classe ~ ., data = model_train_dat, method = "rf")
+training_model
+
+## Random Forest 
+##
+## 11776 samples
+##    52 predictor
+##     5 classes: 'A', 'B', 'C', 'D', 'E' 
+##
+## No pre-processing
+## Resampling: Bootstrapped (25 reps) 
+## Summary of sample sizes: 11776, 11776, 11776, 11776, 11776, 11776, ... 
+## Resampling results across tuning parameters:
+##
+##  mtry  Accuracy   Kappa    
+##   2    0.9857255  0.9819443
+##  27    0.9872909  0.9839259
+##  52    0.9773708  0.9713754
+##
+## Accuracy was used to select the optimal model using  the largest value.
+## The final value used for the model was mtry = 27. 
+
+
+pred <- predict(training_model, model_train_dat)
+confusionMatrix(pred, model_train_dat$classe)
+
+## Confusion Matrix and Statistics
+## 
+##          Reference
+## Prediction    A    B    C    D    E
+##          A 3348    0    0    0    0
+##          B    0 2279    0    0    0
+##          C    0    0 2054    0    0
+##          D    0    0    0 1930    0
+##          E    0    0    0    0 2165
+## 
+## Overall Statistics
+##                                      
+##                Accuracy : 1          
+##                  95% CI : (0.9997, 1)
+##     No Information Rate : 0.2843     
+##     P-Value [Acc > NIR] : < 2.2e-16  
+##                                      
+##                   Kappa : 1          
+##  Mcnemar's Test P-Value : NA         
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity            1.0000   1.0000   1.0000   1.0000   1.0000
+## Specificity            1.0000   1.0000   1.0000   1.0000   1.0000
+## Pos Pred Value         1.0000   1.0000   1.0000   1.0000   1.0000
+## Neg Pred Value         1.0000   1.0000   1.0000   1.0000   1.0000
+## Prevalence             0.2843   0.1935   0.1744   0.1639   0.1838
+## Detection Rate         0.2843   0.1935   0.1744   0.1639   0.1838
+## Detection Prevalence   0.2843   0.1935   0.1744   0.1639   0.1838
+## Balanced Accuracy      1.0000   1.0000   1.0000   1.0000   1.0000
+
+
+```
+
+### Evaluation of the model on the testing dataset
+
+```{r, warning = FALSE, message = TRUE}
+pred <- predict(training_model, model_test_dat)
+confusionMatrix(pred, model_test_dat$classe)
+
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction    A    B    C    D    E
+##          A 2230   16    0    0    0
+##          B    1 1498    6    2    2
+##          C    0    4 1353   18    7
+##          D    0    0    9 1265    7
+##          E    1    0    0    1 1426
+## 
+## Overall Statistics
+##                                           
+##                Accuracy : 0.9906          
+##                  95% CI : (0.9882, 0.9926)
+##     No Information Rate : 0.2845          
+##     P-Value [Acc > NIR] : < 2.2e-16       
+##                                           
+##                   Kappa : 0.9881          
+##  Mcnemar's Test P-Value : NA              
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity            0.9991   0.9868   0.9890   0.9837   0.9889
+## Specificity            0.9971   0.9983   0.9955   0.9976   0.9997
+## Pos Pred Value         0.9929   0.9927   0.9790   0.9875   0.9986
+## Neg Pred Value         0.9996   0.9968   0.9977   0.9968   0.9975
+## Prevalence             0.2845   0.1935   0.1744   0.1639   0.1838
+## Detection Rate         0.2842   0.1909   0.1724   0.1612   0.1817
+## Detection Prevalence   0.2863   0.1923   0.1761   0.1633   0.1820
+## Balanced Accuracy      0.9981   0.9925   0.9923   0.9906   0.9943
+
+
+```
+
+### Variable Importance
+
+```{r, warning = FALSE, message = TRUE}
+varImp(training_model)
+
+## rf variable importance
+##
+##  only 20 most important variables shown (out of 52)
+##
+##                      Overall
+## roll_belt            100.000
+## pitch_forearm         58.459
+## yaw_belt              51.520
+## pitch_belt            44.831
+## roll_forearm          43.671
+## magnet_dumbbell_z     43.387
+## magnet_dumbbell_y     42.577
+## accel_dumbbell_y      22.396
+## roll_dumbbell         17.507
+## magnet_dumbbell_x     17.279
+## accel_forearm_x       16.119
+## magnet_belt_z         14.983
+## accel_belt_z          14.192
+## magnet_forearm_z      13.991
+## accel_dumbbell_z      13.660
+## total_accel_dumbbell  12.906
+## magnet_belt_y         12.230
+## yaw_arm               11.507
+## gyros_belt_z          11.233
+## magnet_belt_x          9.674
+
+
+training_model$finalModel
+
+## Call:
+##  randomForest(x = x, y = y, mtry = param$mtry) 
+##                Type of random forest: classification
+##                      Number of trees: 500
+## No. of variables tried at each split: 27
+## 
+##         OOB estimate of  error rate: 0.79%
+## Confusion matrix:
+##      A    B    C    D    E class.error
+## A 3340    7    1    0    0 0.002389486
+## B   15 2254    9    1    0 0.010969724
+## C    0   12 2033    9    0 0.010223953
+## D    1    0   25 1901    3 0.015025907
+## E    0    1    2    7 2155 0.004618938
+
+```
+
+### Predicting on the original test data (test_dat)
+```{r, warning = FALSE, message = FALSE, fig.width=12,fig.height=12,dpi=100,out.width='1200px',out.height='1200px'}
+# Get predictions and evaluate.
+pred <- predict(training_model, model_train_dat)
+
+pred_test <- predict(training_model, test_dat[, pred_candidates])
+pred_test
+
+pred_result <- cbind(pred_test, test_dat)
+subset(pred_result, select=names(pred_result)[grep("belt|[^(fore)]arm|dumbbell|forearm", names(pred_result), invert=TRUE)])
+
+##   pred_test  X user_name raw_timestamp_part_1 raw_timestamp_part_2   cvtd_timestamp new_window num_window problem_id
+## 1         B  1     pedro           1323095002               868349 05/12/2011 14:23         no         74          1
+## 2         A  2    jeremy           1322673067               778725 30/11/2011 17:11         no        431          2
+## 3         B  3    jeremy           1322673075               342967 30/11/2011 17:11         no        439          3
+## 4         A  4    adelmo           1322832789               560311 02/12/2011 13:33         no        194          4
+## 5         A  5    eurico           1322489635               814776 28/11/2011 14:13         no        235          5
+## 6         E  6    jeremy           1322673149               510661 30/11/2011 17:12         no        504          6
+## 7         D  7    jeremy           1322673128               766645 30/11/2011 17:12         no        485          7
+## 8         B  8    jeremy           1322673076                54671 30/11/2011 17:11         no        440          8
+## 9         A  9  carlitos           1323084240               916313 05/12/2011 11:24         no        323          9
+## 10        A 10   charles           1322837822               384285 02/12/2011 14:57         no        664         10
+## 11        B 11  carlitos           1323084277                36553 05/12/2011 11:24         no        859         11
+## 12        C 12    jeremy           1322673101               442731 30/11/2011 17:11         no        461         12
+## 13        B 13    eurico           1322489661               298656 28/11/2011 14:14         no        257         13
+## 14        A 14    jeremy           1322673043               178652 30/11/2011 17:10         no        408         14
+## 15        E 15    jeremy           1322673156               550750 30/11/2011 17:12         no        779         15
+## 16        E 16    eurico           1322489713               706637 28/11/2011 14:15         no        302         16
+## 17        A 17     pedro           1323094971               920315 05/12/2011 14:22         no         48         17
+## 18        B 18  carlitos           1323084285               176314 05/12/2011 11:24         no        361         18
+## 19        B 19     pedro           1323094999               828379 05/12/2011 14:23         no         72         19
+## 20        B 20    eurico           1322489658               106658 28/11/2011 14:14         no        255         20
+
+```
+
+## Conclusion
+
+The random forest algorithm appears to perform very well for predicting activities from accelerometers measurements with an The estimated error rate less than 1%.
+
